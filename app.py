@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 st.title("🌙 PDF Dark Mode Converter")
-st.write("Convert PDFs to dark mode with collapsible previews and batch download.")
+st.write("Convert PDFs to dark mode and preview pages like a gallery. Click a thumbnail to focus.")
 
 # -----------------------
 # Utilities
@@ -36,8 +36,7 @@ def smart_dark_mode(img, contrast=2.2, brightness=1.0, bg_color=0):
 uploaded_files = st.file_uploader(
     "Upload one or more PDFs",
     type=["pdf"],
-    accept_multiple_files=True,
-    key="pdf_uploader"
+    accept_multiple_files=True
 )
 
 contrast = st.slider("Text Contrast", 1.5, 3.0, 2.2, 0.1)
@@ -46,74 +45,84 @@ bg_color = st.slider("Background Darkness (0=Black → 80=Dark Gray)", 0, 80, 0,
 dpi = st.slider("PDF DPI (Performance)", 100, 300, 150, 10)
 
 # -----------------------
-# Initialize session state
+# Session state for processed PDFs and focused image
 # -----------------------
 if "pdfs" not in st.session_state:
-    st.session_state.pdfs = {}
+    st.session_state.pdfs = {}  # name -> {processed_pages, thumbnails}
+if "focused_image" not in st.session_state:
+    st.session_state.focused_image = None
 
-# Store uploaded files in session state
+# -----------------------
+# Process uploaded PDFs
+# -----------------------
 if uploaded_files:
     for uploaded_file in uploaded_files:
         if uploaded_file.name not in st.session_state.pdfs:
-            st.session_state.pdfs[uploaded_file.name] = {"file": uploaded_file, "processed": None}
+            try:
+                pages = convert_from_bytes(uploaded_file.read(), dpi=dpi)
+                processed_pages = []
+                thumbnails = []
+
+                for page in pages:
+                    if is_mostly_white(page):
+                        out = smart_dark_mode(page, contrast, brightness, bg_color)
+                    else:
+                        out = smart_dark_mode(page, contrast=1.6, brightness=brightness, bg_color=bg_color)
+
+                    processed_pages.append(out)
+                    # Create small thumbnail for gallery
+                    thumb = out.copy()
+                    thumb.thumbnail((100, 140))
+                    thumbnails.append(thumb)
+
+                st.session_state.pdfs[uploaded_file.name] = {
+                    "processed_pages": processed_pages,
+                    "thumbnails": thumbnails
+                }
+
+            except Exception as e:
+                st.error(f"Error processing {uploaded_file.name}: {e}")
 
 # -----------------------
-# Display expanders for each uploaded PDF
+# Display gallery previews
 # -----------------------
-zip_buffer = io.BytesIO()
-with zipfile.ZipFile(zip_buffer, "w") as zip_file:
-    for name, pdf_data in st.session_state.pdfs.items():
-        with st.expander(f"📄 {name}", expanded=False):
-            file = pdf_data["file"]
-            if pdf_data["processed"] is None:
-                # Convert PDF pages to images
-                try:
-                    pages = convert_from_bytes(file.read(), dpi=dpi)
-                    processed_pages = []
-                    st.write("Preview of pages:")
+for pdf_name, pdf_data in st.session_state.pdfs.items():
+    st.subheader(f"📄 {pdf_name}")
 
-                    for i, page in enumerate(pages):
-                        if is_mostly_white(page):
-                            out = smart_dark_mode(page, contrast, brightness, bg_color)
-                        else:
-                            out = smart_dark_mode(page, contrast=1.6, brightness=brightness, bg_color=bg_color)
-                        processed_pages.append(out)
-                        st.image(out, caption=f"Page {i+1}", use_column_width=True)
+    thumbnails = pdf_data["thumbnails"]
+    processed_pages = pdf_data["processed_pages"]
 
-                    # Save processed PDF in memory
-                    pdf_bytes = io.BytesIO()
-                    processed_pages[0].save(
-                        pdf_bytes,
-                        format="PDF",
-                        save_all=True,
-                        append_images=processed_pages[1:]
-                    )
-
-                    # Store in session state
-                    st.session_state.pdfs[name]["processed"] = pdf_bytes.getvalue()
-                    st.success("✅ Conversion complete for this PDF!")
-
-                except Exception as e:
-                    st.error(f"❌ Error processing {name}: {e}")
-
-            else:
-                # Already processed, just show button
-                st.success("✅ Already processed")
-                st.download_button(
-                    label="⬇️ Download PDF",
-                    data=st.session_state.pdfs[name]["processed"],
-                    file_name=f"dark_{name}",
-                    mime="application/pdf"
-                )
-
-            # Add to ZIP
-            if st.session_state.pdfs[name]["processed"]:
-                zip_file.writestr(f"dark_{name}", st.session_state.pdfs[name]["processed"])
+    # Show thumbnails in columns
+    cols = st.columns(len(thumbnails))
+    for idx, col in enumerate(cols):
+        if col.button(" ", key=f"{pdf_name}_{idx}", help=f"Page {idx+1}"):
+            st.session_state.focused_image = processed_pages[idx]
+        col.image(thumbnails[idx], use_column_width=True)
 
 # -----------------------
-# Download all PDFs as ZIP
+# Show focused image
+# -----------------------
+if st.session_state.focused_image:
+    st.divider()
+    st.subheader("Focused Preview")
+    st.image(st.session_state.focused_image, use_column_width=True)
+
+# -----------------------
+# Prepare ZIP download
 # -----------------------
 if st.session_state.pdfs:
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as zip_file:
+        for pdf_name, pdf_data in st.session_state.pdfs.items():
+            pdf_bytes = io.BytesIO()
+            pdf_data["processed_pages"][0].save(
+                pdf_bytes,
+                format="PDF",
+                save_all=True,
+                append_images=pdf_data["processed_pages"][1:]
+            )
+            zip_file.writestr(f"dark_{pdf_name}", pdf_bytes.getvalue())
+
     st.download_button(
         label="⬇️ Download All PDFs as ZIP",
         data=zip_buffer.getvalue(),
