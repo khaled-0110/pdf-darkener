@@ -5,9 +5,6 @@ import numpy as np
 import io
 import zipfile
 
-# -----------------------
-# Page configuration
-# -----------------------
 st.set_page_config(
     page_title="PDF Dark Mode Converter",
     page_icon="🌙",
@@ -15,34 +12,23 @@ st.set_page_config(
 )
 
 st.title("🌙 PDF Dark Mode Converter")
-st.write(
-    "Convert PDFs to dark mode for better eye comfort. "
-    "Supports batch uploads, collapsible previews, and adjustable settings."
-)
+st.write("Convert PDFs to dark mode with collapsible previews and batch download.")
 
 # -----------------------
-# Utility functions
+# Utilities
 # -----------------------
 def is_mostly_white(img, threshold=200):
-    """Detect if the page background is mostly white"""
     gray = np.array(img.convert("L"))
-    white_ratio = np.mean(gray > threshold)
-    return white_ratio > 0.6
-
+    return np.mean(gray > threshold) > 0.6
 
 def smart_dark_mode(img, contrast=2.2, brightness=1.0, bg_color=0):
-    """Convert a PDF page to dark mode with optional dark gray background"""
     gray = img.convert("L")
     gray = ImageEnhance.Contrast(gray).enhance(contrast)
     gray = ImageEnhance.Brightness(gray).enhance(brightness)
     inverted = ImageOps.invert(gray)
-
-    # Merge with background color
     final = Image.new("L", inverted.size, color=bg_color)
     final.paste(inverted, mask=inverted)
-
     return final
-
 
 # -----------------------
 # UI Controls
@@ -50,7 +36,8 @@ def smart_dark_mode(img, contrast=2.2, brightness=1.0, bg_color=0):
 uploaded_files = st.file_uploader(
     "Upload one or more PDFs",
     type=["pdf"],
-    accept_multiple_files=True
+    accept_multiple_files=True,
+    key="pdf_uploader"
 )
 
 contrast = st.slider("Text Contrast", 1.5, 3.0, 2.2, 0.1)
@@ -59,50 +46,74 @@ bg_color = st.slider("Background Darkness (0=Black → 80=Dark Gray)", 0, 80, 0,
 dpi = st.slider("PDF DPI (Performance)", 100, 300, 150, 10)
 
 # -----------------------
-# Processing
+# Initialize session state
 # -----------------------
+if "pdfs" not in st.session_state:
+    st.session_state.pdfs = {}
+
+# Store uploaded files in session state
 if uploaded_files:
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w") as zip_file:
-        for uploaded_file in uploaded_files:
-            st.divider()
+    for uploaded_file in uploaded_files:
+        if uploaded_file.name not in st.session_state.pdfs:
+            st.session_state.pdfs[uploaded_file.name] = {"file": uploaded_file, "processed": None}
 
-            # Collapsible section for each PDF
-            with st.expander(f"📄 {uploaded_file.name}", expanded=False):
-                with st.spinner("Processing PDF..."):
-                    try:
-                        # Convert PDF pages to images
-                        pages = convert_from_bytes(uploaded_file.read(), dpi=dpi)
-                        processed_pages = []
+# -----------------------
+# Display expanders for each uploaded PDF
+# -----------------------
+zip_buffer = io.BytesIO()
+with zipfile.ZipFile(zip_buffer, "w") as zip_file:
+    for name, pdf_data in st.session_state.pdfs.items():
+        with st.expander(f"📄 {name}", expanded=False):
+            file = pdf_data["file"]
+            if pdf_data["processed"] is None:
+                # Convert PDF pages to images
+                try:
+                    pages = convert_from_bytes(file.read(), dpi=dpi)
+                    processed_pages = []
+                    st.write("Preview of pages:")
 
-                        # Process each page
-                        for i, page in enumerate(pages):
-                            if is_mostly_white(page):
-                                out = smart_dark_mode(page, contrast, brightness, bg_color)
-                            else:
-                                out = smart_dark_mode(page, contrast=1.6, brightness=brightness, bg_color=bg_color)
+                    for i, page in enumerate(pages):
+                        if is_mostly_white(page):
+                            out = smart_dark_mode(page, contrast, brightness, bg_color)
+                        else:
+                            out = smart_dark_mode(page, contrast=1.6, brightness=brightness, bg_color=bg_color)
+                        processed_pages.append(out)
+                        st.image(out, caption=f"Page {i+1}", use_column_width=True)
 
-                            processed_pages.append(out)
-                            st.image(out, caption=f"Page {i+1}", use_column_width=True)
+                    # Save processed PDF in memory
+                    pdf_bytes = io.BytesIO()
+                    processed_pages[0].save(
+                        pdf_bytes,
+                        format="PDF",
+                        save_all=True,
+                        append_images=processed_pages[1:]
+                    )
 
-                        # Save processed pages to PDF in memory
-                        pdf_bytes = io.BytesIO()
-                        processed_pages[0].save(
-                            pdf_bytes,
-                            format="PDF",
-                            save_all=True,
-                            append_images=processed_pages[1:]
-                        )
+                    # Store in session state
+                    st.session_state.pdfs[name]["processed"] = pdf_bytes.getvalue()
+                    st.success("✅ Conversion complete for this PDF!")
 
-                        # Add PDF to ZIP file
-                        zip_file.writestr(f"dark_{uploaded_file.name}", pdf_bytes.getvalue())
+                except Exception as e:
+                    st.error(f"❌ Error processing {name}: {e}")
 
-                        st.success("✅ Conversion complete for this PDF!")
+            else:
+                # Already processed, just show button
+                st.success("✅ Already processed")
+                st.download_button(
+                    label="⬇️ Download PDF",
+                    data=st.session_state.pdfs[name]["processed"],
+                    file_name=f"dark_{name}",
+                    mime="application/pdf"
+                )
 
-                    except Exception as e:
-                        st.error(f"❌ Error processing {uploaded_file.name}: {e}")
+            # Add to ZIP
+            if st.session_state.pdfs[name]["processed"]:
+                zip_file.writestr(f"dark_{name}", st.session_state.pdfs[name]["processed"])
 
-    st.success("✅ All PDFs processed!")
+# -----------------------
+# Download all PDFs as ZIP
+# -----------------------
+if st.session_state.pdfs:
     st.download_button(
         label="⬇️ Download All PDFs as ZIP",
         data=zip_buffer.getvalue(),
